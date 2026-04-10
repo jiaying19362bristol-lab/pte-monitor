@@ -253,6 +253,29 @@ app.delete("/api/file", (req, res) => {
   return res.json({ ok: true, deleted: true });
 });
 
+app.delete("/api/cloud-file", async (req, res) => {
+  if (!syncEnabled || !supabase) {
+    return res.status(400).json({ ok: false, error: "cloud sync not configured" });
+  }
+  const rawRelative = String(req.query.relativePath || "").replaceAll("\\", "/");
+  if (!rawRelative) return res.status(400).json({ ok: false, error: "relativePath is required" });
+
+  try {
+    await ensureBucketExists();
+    const { error: storageError } = await supabase.storage.from(supabaseBucket).remove([rawRelative]);
+    if (storageError) {
+      console.warn(`Cloud storage delete warning: ${storageError.message}`);
+    }
+
+    const { error: dbError } = await supabase.from("ra_recordings").delete().eq("file_path", rawRelative);
+    if (dbError) throw dbError;
+
+    return res.json({ ok: true, deleted: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || "cloud_delete_failed" });
+  }
+});
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });

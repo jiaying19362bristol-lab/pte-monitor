@@ -219,17 +219,7 @@ async function deleteRecording(type, questionId, record) {
     if (!response.ok) throw new Error("本地删除失败");
     return;
   }
-
-  await deleteRecordingFromCloud(record);
-
-  // Best-effort local cleanup if mirrored file exists.
-  try {
-    await fetch(`${LOCAL_DELETE_ENDPOINT}?relativePath=${encodeURIComponent(record.file_path)}`, {
-      method: "DELETE"
-    });
-  } catch (_error) {
-    // ignore local cleanup failure
-  }
+  throw new Error("云端文件不支持在页面删除。");
 }
 
 async function getRecordings(type, questionId) {
@@ -335,7 +325,7 @@ function renderRecordings(records, type, questionId, isViewer) {
           <div class="record-actions">
             <span>${formatTime(record.created_at)}</span>
             ${
-              !isViewer
+              record.local_only && !isViewer
                 ? `<button
               type="button"
               class="btn secondary record-delete-btn"

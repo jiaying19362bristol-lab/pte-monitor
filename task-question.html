@@ -141,9 +141,11 @@
                     "</h3><div class='record-actions'><span>" +
                     new Date(f.created_at).toLocaleString("zh-CN") +
                     "</span>" +
-                    (f.local_only
+                    (!isViewer && f.local_only
                       ? "<button type='button' class='btn secondary record-delete-btn' data-path='" +
                         f.file_path +
+                        "' data-local='" +
+                        (f.local_only ? "1" : "0") +
                         "'>删除音频</button>"
                       : "") +
                     "</div></div><audio controls src='" +
@@ -156,10 +158,11 @@
               listEl.querySelectorAll(".record-delete-btn").forEach(function (btn) {
                 btn.addEventListener("click", function () {
                   const relativePath = btn.getAttribute("data-path");
-                  fetch(
-                    "http://localhost:18787/api/file?relativePath=" + encodeURIComponent(relativePath),
-                    { method: "DELETE" }
-                  )
+                  const isLocal = btn.getAttribute("data-local") === "1";
+                  const endpoint = isLocal
+                    ? "http://localhost:18787/api/file?relativePath=" + encodeURIComponent(relativePath)
+                    : "http://localhost:18787/api/cloud-file?relativePath=" + encodeURIComponent(relativePath);
+                  fetch(endpoint, { method: "DELETE" })
                     .then(function (r) {
                       if (!r.ok) throw new Error("delete_failed");
                       return r.json();
