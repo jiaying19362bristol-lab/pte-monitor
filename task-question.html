@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>题目详情 | PTE 学习网站</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="card">
+        <div class="top-row">
+          <h1 id="question-title">题目详情</h1>
+          <a class="btn secondary" id="back-list-link" href="index.html">返回列表</a>
+        </div>
+
+        <div class="question-content" id="question-text"></div>
+
+        <hr class="split-line" />
+
+        <h2>上传你的音频</h2>
+        <p>同一道题可以上传多个音频，每个音频都可以单独评论。</p>
+        <form id="upload-form" class="upload-row">
+          <input id="audio-file" type="file" accept="audio/*" required />
+          <button type="submit" class="btn">上传音频</button>
+        </form>
+
+        <p id="sync-status" class="sync-status"></p>
+        <div id="recording-list" class="recording-list"></div>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="supabase-config.js"></script>
+    <script src="task.js"></script>
+  </body>
+</html>
