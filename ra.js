@@ -6,9 +6,18 @@ const QUESTIONS = {
   }
 };
 
-const DB_NAME = "pte_ra_db";
-const DB_VERSION = 1;
-const STORE_NAME = "recordings";
+const statusEl = document.getElementById("sync-status");
+const config = window.SUPABASE_CONFIG || {};
+const supabaseReady =
+  typeof window.supabase !== "undefined" &&
+  typeof config.url === "string" &&
+  config.url &&
+  typeof config.anonKey === "string" &&
+  config.anonKey;
+const supabase = supabaseReady
+  ? window.supabase.createClient(config.url, config.anonKey)
+  : null;
+const bucket = config.bucket || "ra-audios";
 
 function getQuestionId() {
   const params = new URLSearchParams(window.location.search);
@@ -19,62 +28,91 @@ function formatTime(ts) {
   return new Date(ts).toLocaleString("zh-CN");
 }
 
-function openDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, {
-          keyPath: "id",
-          autoIncrement: true
-        });
-        store.createIndex("questionId", "questionId", { unique: false });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function setStatus(text, isError = false) {
+  if (!statusEl) return;
+  statusEl.textContent = text;
+  statusEl.style.color = isError ? "#bf1b1b" : "#54627a";
+}
+
+function escapeHtml(input) {
+  return String(input)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function makeSafePathName(fileName) {
+  return fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 async function addRecording(questionId, file) {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.add({
-      questionId,
-      fileName: file.name,
-      blob: file,
-      createdAt: Date.now(),
-      comments: []
+  const filePath = `${questionId}/${Date.now()}-${makeSafePathName(file.name)}`;
+  const { error: uploadError } = await supabase.storage
+    .from(bucket)
+    .upload(filePath, file, {
+      upsert: false
     });
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+  if (uploadError) throw uploadError;
+
+  const {
+    data: { publicUrl }
+  } = supabase.storage.from(bucket).getPublicUrl(filePath);
+
+  const { error: insertError } = await supabase.from("ra_recordings").insert({
+    question_id: questionId,
+    file_name: file.name,
+    file_path: filePath,
+    public_url: publicUrl
   });
+
+  if (insertError) throw insertError;
 }
 
 async function getRecordings(questionId) {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readonly");
-    const store = tx.objectStore(STORE_NAME);
-    const index = store.index("questionId");
-    const request = index.getAll(questionId);
-    request.onsuccess = () => resolve(request.result || []);
-    request.onerror = () => reject(request.error);
-  });
+  const { data: recordings, error: recordingError } = await supabase
+    .from("ra_recordings")
+    .select("id, file_name, public_url, created_at")
+    .eq("question_id", questionId)
+    .order("created_at", { ascending: false });
+  if (recordingError) throw recordingError;
+
+  if (!recordings || !recordings.length) return [];
+
+  const recordIds = recordings.map((record) => record.id);
+  const { data: comments, error: commentError } = await supabase
+    .from("ra_comments")
+    .select("id, recording_id, author, content, created_at")
+    .in("recording_id", recordIds)
+    .order("created_at", { ascending: true });
+  if (commentError) throw commentError;
+
+  const commentsByRecordingId = {};
+  for (const comment of comments || []) {
+    const key = comment.recording_id;
+    if (!commentsByRecordingId[key]) commentsByRecordingId[key] = [];
+    commentsByRecordingId[key].push(comment);
+  }
+
+  return recordings.map((record) => ({
+    ...record,
+    comments: commentsByRecordingId[record.id] || []
+  }));
 }
 
-async function updateRecording(record) {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.put(record);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+async function addComment(recordingId, author, text) {
+  const { error } = await supabase.from("ra_comments").insert({
+    recording_id: recordingId,
+    author,
+    content: text
   });
+  if (error) throw error;
+}
+
+async function deleteComment(commentId) {
+  const { error } = await supabase.from("ra_comments").delete().eq("id", commentId);
+  if (error) throw error;
 }
 
 function renderQuestion(question) {
@@ -89,26 +127,23 @@ function renderRecordings(records, questionId) {
     return;
   }
 
-  const sorted = [...records].sort((a, b) => b.createdAt - a.createdAt);
-  container.innerHTML = sorted
+  container.innerHTML = records
     .map((record) => {
-      const audioUrl = URL.createObjectURL(record.blob);
       const commentsHtml = (record.comments || [])
         .map(
-          (c, index) =>
+          (c) =>
             `<li>
               <div class="comment-row">
-                <span><strong>${c.author}</strong>：${c.text}</span>
+                <span><strong>${escapeHtml(c.author)}</strong>：${escapeHtml(c.content)}</span>
                 <button
                   type="button"
                   class="btn secondary comment-delete-btn"
-                  data-record-id="${record.id}"
-                  data-comment-index="${index}"
+                  data-comment-id="${c.id}"
                 >
                   删除
                 </button>
               </div>
-              <span class="comment-time">${formatTime(c.createdAt)}</span>
+              <span class="comment-time">${formatTime(c.created_at)}</span>
             </li>`
         )
         .join("");
@@ -116,10 +151,10 @@ function renderRecordings(records, questionId) {
       return `
         <article class="record-card">
           <div class="record-head">
-            <h3>${record.fileName}</h3>
-            <span>${formatTime(record.createdAt)}</span>
+            <h3>${escapeHtml(record.file_name)}</h3>
+            <span>${formatTime(record.created_at)}</span>
           </div>
-          <audio controls src="${audioUrl}"></audio>
+          <audio controls src="${record.public_url}"></audio>
           <div class="comment-box">
             <h4>评论区</h4>
             <ul>${commentsHtml || "<li>暂无评论</li>"}</ul>
@@ -142,39 +177,30 @@ function renderRecordings(records, questionId) {
       const author = String(formData.get("author") || "").trim();
       const text = String(formData.get("text") || "").trim();
       if (!author || !text) return;
-
-      const currentRecords = await getRecordings(questionId);
-      const target = currentRecords.find((item) => item.id === id);
-      if (!target) return;
-
-      target.comments = target.comments || [];
-      target.comments.push({ author, text, createdAt: Date.now() });
-      await updateRecording(target);
+      await addComment(id, author, text);
+      form.reset();
       await loadAndRender(questionId);
     });
   });
 
   container.querySelectorAll(".comment-delete-btn").forEach((button) => {
     button.addEventListener("click", async () => {
-      const recordId = Number(button.dataset.recordId);
-      const commentIndex = Number(button.dataset.commentIndex);
-      if (Number.isNaN(recordId) || Number.isNaN(commentIndex)) return;
-
-      const currentRecords = await getRecordings(questionId);
-      const target = currentRecords.find((item) => item.id === recordId);
-      if (!target || !Array.isArray(target.comments)) return;
-      if (commentIndex < 0 || commentIndex >= target.comments.length) return;
-
-      target.comments.splice(commentIndex, 1);
-      await updateRecording(target);
+      const commentId = Number(button.dataset.commentId);
+      if (Number.isNaN(commentId)) return;
+      await deleteComment(commentId);
       await loadAndRender(questionId);
     });
   });
 }
 
 async function loadAndRender(questionId) {
-  const records = await getRecordings(questionId);
-  renderRecordings(records, questionId);
+  try {
+    const records = await getRecordings(questionId);
+    renderRecordings(records, questionId);
+  } catch (error) {
+    setStatus("读取云端数据失败，请检查 Supabase 配置。", true);
+    throw error;
+  }
 }
 
 async function initPage() {
@@ -186,6 +212,12 @@ async function initPage() {
     return;
   }
 
+  if (!supabaseReady) {
+    setStatus("请先在 supabase-config.js 填写 Supabase URL 和 anon key。", true);
+    return;
+  }
+
+  setStatus("云端同步已启用：你和老师可看到同样的音频与评论。");
   renderQuestion(question);
   await loadAndRender(questionId);
 
@@ -196,9 +228,15 @@ async function initPage() {
     const file = fileInput.files && fileInput.files[0];
     if (!file) return;
 
-    await addRecording(questionId, file);
-    fileInput.value = "";
-    await loadAndRender(questionId);
+    try {
+      setStatus("音频上传中，请稍候...");
+      await addRecording(questionId, file);
+      fileInput.value = "";
+      setStatus("上传成功，已同步到云端。");
+      await loadAndRender(questionId);
+    } catch (error) {
+      setStatus(`上传失败：${error.message || "未知错误"}`, true);
+    }
   });
 }
 

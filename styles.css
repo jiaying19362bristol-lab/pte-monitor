@@ -208,6 +208,11 @@ audio {
   margin: 0;
 }
 
+.sync-status {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
 @media (max-width: 520px) {
   .container {
     margin: 18px auto;
