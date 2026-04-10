@@ -319,7 +319,7 @@ async function runAutoArchive(type, questionId) {
   return { archivedCount: toArchive.length, totalArchived: readLocalArchive().length };
 }
 
-function renderRecordings(records, type, questionId) {
+function renderRecordings(records, type, questionId, isViewer) {
   const container = document.getElementById("recording-list");
   if (!container) return;
   if (!records.length) {
@@ -335,7 +335,7 @@ function renderRecordings(records, type, questionId) {
           <div class="record-actions">
             <span>${formatTime(record.created_at)}</span>
             ${
-              record.local_only
+              record.local_only && !isViewer
                 ? `<button
               type="button"
               class="btn secondary record-delete-btn"
@@ -360,9 +360,13 @@ function renderRecordings(records, type, questionId) {
                 <li>
                   <div class="comment-row">
                     <span><strong>${escapeHtml(c.author)}</strong>：${escapeHtml(c.content)}</span>
-                    <button type="button" class="btn secondary comment-delete-btn" data-comment-id="${c.id}">
+                    ${
+                      isViewer
+                        ? ""
+                        : `<button type="button" class="btn secondary comment-delete-btn" data-comment-id="${c.id}">
                       删除
-                    </button>
+                    </button>`
+                    }
                   </div>
                   <span class="comment-time">${formatTime(c.created_at)}</span>
                 </li>
@@ -397,29 +401,33 @@ function renderRecordings(records, type, questionId) {
       if (!author || !text || !id) return;
       await addComment(id, author, text);
       form.reset();
-      await loadAndRenderQuestion(type, questionId);
+      await loadAndRenderQuestion(type, questionId, isViewer);
     });
   });
 
-  container.querySelectorAll(".comment-delete-btn").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const commentId = Number(button.dataset.commentId);
-      if (Number.isNaN(commentId)) return;
-      await deleteComment(commentId);
-      await loadAndRenderQuestion(type, questionId);
+  if (!isViewer) {
+    container.querySelectorAll(".comment-delete-btn").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const commentId = Number(button.dataset.commentId);
+        if (Number.isNaN(commentId)) return;
+        await deleteComment(commentId);
+        await loadAndRenderQuestion(type, questionId, isViewer);
+      });
     });
-  });
+  }
 
-  container.querySelectorAll(".record-delete-btn").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const filePath = button.dataset.filePath;
-      const record = records.find((item) => item.file_path === filePath);
-      if (!record) return;
-      if (!record.local_only) return;
-      await deleteRecording(type, questionId, record);
-      await loadAndRenderQuestion(type, questionId);
+  if (!isViewer) {
+    container.querySelectorAll(".record-delete-btn").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const filePath = button.dataset.filePath;
+        const record = records.find((item) => item.file_path === filePath);
+        if (!record) return;
+        if (!record.local_only) return;
+        await deleteRecording(type, questionId, record);
+        await loadAndRenderQuestion(type, questionId, isViewer);
+      });
     });
-  });
+  }
 }
 
 async function loadAndRenderQuestion(type, questionId, isViewer) {
@@ -438,7 +446,7 @@ async function loadAndRenderQuestion(type, questionId, isViewer) {
   const merged = Array.from(byPath.values()).sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   );
-  renderRecordings(merged, type, questionId);
+  renderRecordings(merged, type, questionId, isViewer);
 }
 
 async function renderQuestionPage(type, questionId, isViewer) {
