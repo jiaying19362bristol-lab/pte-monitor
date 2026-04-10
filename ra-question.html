@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RA 题目详情 | PTE 学习网站</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="card">
+        <div class="top-row">
+          <h1 id="question-title">RA 题目</h1>
+          <a class="btn secondary" href="ra.html">返回 RA 列表</a>
+        </div>
+
+        <div class="question-content" id="question-text"></div>
+
+        <hr class="split-line" />
+
+        <h2>上传你的音频</h2>
+        <p>同一道题可以上传多个音频，每个音频都可以单独评论。</p>
+        <form id="upload-form" class="upload-row">
+          <input id="audio-file" type="file" accept="audio/*" required />
+          <button type="submit" class="btn">上传音频</button>
+        </form>
+
+        <div id="recording-list" class="recording-list"></div>
+      </section>
+    </main>
+
+    <script src="ra.js"></script>
+  </body>
+</html>
