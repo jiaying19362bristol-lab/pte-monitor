@@ -18,6 +18,8 @@ const supabase = supabaseReady
   ? window.supabase.createClient(config.url, config.anonKey)
   : null;
 const bucket = config.bucket || "ra-audios";
+const ARCHIVE_KEY = "pte_ra_local_archive_v1";
+const RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 
 function getQuestionId() {
   const params = new URLSearchParams(window.location.search);
@@ -113,6 +115,66 @@ async function addComment(recordingId, author, text) {
 async function deleteComment(commentId) {
   const { error } = await supabase.from("ra_comments").delete().eq("id", commentId);
   if (error) throw error;
+}
+
+function readLocalArchive() {
+  try {
+    const text = localStorage.getItem(ARCHIVE_KEY);
+    return text ? JSON.parse(text) : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function writeLocalArchive(items) {
+  localStorage.setItem(ARCHIVE_KEY, JSON.stringify(items));
+}
+
+function archiveRecordsLocally(records) {
+  const existing = readLocalArchive();
+  const existingIds = new Set(existing.map((item) => item.id));
+  const merged = [...existing];
+  for (const record of records) {
+    if (!existingIds.has(record.id)) {
+      merged.push({
+        ...record,
+        archived_at: new Date().toISOString()
+      });
+    }
+  }
+  writeLocalArchive(merged);
+}
+
+async function deleteRecordingFromCloud(record) {
+  const { error: storageError } = await supabase.storage.from(bucket).remove([record.file_path]);
+  if (storageError) {
+    // Continue deleting DB rows even if file is already missing.
+    console.warn("Storage remove warning:", storageError.message);
+  }
+
+  const { error: dbError } = await supabase.from("ra_recordings").delete().eq("id", record.id);
+  if (dbError) throw dbError;
+}
+
+async function runAutoArchive(questionId) {
+  const now = Date.now();
+  const records = await getRecordings(questionId);
+  const toArchive = records.filter((record) => {
+    const createdAt = new Date(record.created_at).getTime();
+    return Number.isFinite(createdAt) && now - createdAt >= RETENTION_MS;
+  });
+
+  if (!toArchive.length) return { archivedCount: 0, totalArchived: readLocalArchive().length };
+
+  archiveRecordsLocally(toArchive);
+  for (const record of toArchive) {
+    await deleteRecordingFromCloud(record);
+  }
+
+  return {
+    archivedCount: toArchive.length,
+    totalArchived: readLocalArchive().length
+  };
 }
 
 function renderQuestion(question) {
@@ -217,8 +279,18 @@ async function initPage() {
     return;
   }
 
-  setStatus("云端同步已启用：你和老师可看到同样的音频与评论。");
+  setStatus("云端同步已启用（保留3天，超时自动归档到本地并清理云端）。");
   renderQuestion(question);
+  try {
+    const archiveResult = await runAutoArchive(questionId);
+    if (archiveResult.archivedCount > 0) {
+      setStatus(
+        `已自动归档 ${archiveResult.archivedCount} 条到本地，当前本地归档共 ${archiveResult.totalArchived} 条。`
+      );
+    }
+  } catch (error) {
+    setStatus(`自动归档失败：${error.message || "未知错误"}`, true);
+  }
   await loadAndRender(questionId);
 
   const uploadForm = document.getElementById("upload-form");
