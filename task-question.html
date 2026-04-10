@@ -13,6 +13,10 @@
           <h1 id="question-title">题目详情</h1>
           <a class="btn secondary" id="back-list-link" href="index.html">返回列表</a>
         </div>
+        <p>
+          访客查看链接：
+          <a id="viewer-share-link" href="#" target="_blank" rel="noopener">生成中...</a>
+        </p>
 
         <div class="question-content" id="question-text"></div>
 
@@ -48,9 +52,22 @@
         const type = (params.get("type") || "RA").toUpperCase();
         const id = params.get("id") || "ra-001";
         const isViewer = params.get("viewer") === "1" || params.get("role") === "viewer";
+        const shareEl = document.getElementById("viewer-share-link");
         titleEl.textContent = type + " | " + id;
         textEl.textContent = "兜底模式已启用：主脚本加载失败，已切换到安全展示模式。";
         statusEl.textContent = "兜底模式：优先读取云端记录，本地服务可选。";
+        if (shareEl) {
+          var shareUrl =
+            window.location.origin +
+            window.location.pathname +
+            "?type=" +
+            encodeURIComponent(type) +
+            "&id=" +
+            encodeURIComponent(id) +
+            "&viewer=1";
+          shareEl.href = shareUrl;
+          shareEl.textContent = shareUrl;
+        }
         if (isViewer) {
           formEl.style.display = "none";
           statusEl.textContent = "访客模式（兜底）：仅查看音频并评论。";

@@ -449,10 +449,18 @@ async function renderQuestionPage(type, questionId, isViewer) {
   const titleEl = document.getElementById("question-title");
   const textEl = document.getElementById("question-text");
   const backLinkEl = document.getElementById("back-list-link");
+  const shareLinkEl = document.getElementById("viewer-share-link");
   if (!titleEl || !textEl || !backLinkEl) return;
   titleEl.textContent = `${type} | ${question.title}`;
   textEl.textContent = question.text;
   backLinkEl.href = `task-list.html?type=${encodeURIComponent(type)}`;
+  if (shareLinkEl) {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?type=${encodeURIComponent(type)}&id=${encodeURIComponent(
+      questionId
+    )}&viewer=1`;
+    shareLinkEl.href = shareUrl;
+    shareLinkEl.textContent = shareUrl;
+  }
 
   if (isViewer) {
     const uploadForm = document.getElementById("upload-form");
