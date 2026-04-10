@@ -39,6 +39,7 @@ const supabase = supabaseReady
 const bucket = config.bucket || "ra-audios";
 const ARCHIVE_KEY = "pte_task_local_archive_v1";
 const RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
+const LOCAL_UPLOAD_ENDPOINT = "http://localhost:18787/api/upload";
 
 function getParams() {
   const params = new URLSearchParams(window.location.search);
@@ -139,19 +140,57 @@ async function deleteRecordingFromCloud(record) {
 }
 
 async function addRecording(type, questionId, file) {
-  const filePath = `${type}/${questionId}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-  const { error: uploadError } = await supabase.storage.from(bucket).upload(filePath, file, { upsert: false });
-  if (uploadError) throw uploadError;
-  const {
-    data: { publicUrl }
-  } = supabase.storage.from(bucket).getPublicUrl(filePath);
-  const { error: insertError } = await supabase.from("ra_recordings").insert({
-    question_id: `${type}:${questionId}`,
-    file_name: file.name,
-    file_path: filePath,
-    public_url: publicUrl
-  });
-  if (insertError) throw insertError;
+  const uploadDirectToCloud = async () => {
+    const baseName = String(file.name || "upload.bin").replaceAll("/", "_").replaceAll("\\", "_");
+    const filePath = `${type}/${questionId}/${baseName}`;
+    const { error: uploadError } = await supabase.storage.from(bucket).upload(filePath, file, { upsert: true });
+    if (uploadError) throw uploadError;
+    const {
+      data: { publicUrl }
+    } = supabase.storage.from(bucket).getPublicUrl(filePath);
+    const { data: existingRecord, error: existingError } = await supabase
+      .from("ra_recordings")
+      .select("id")
+      .eq("file_path", filePath)
+      .maybeSingle();
+    if (existingError) throw existingError;
+    if (existingRecord?.id) {
+      const { error: updateError } = await supabase
+        .from("ra_recordings")
+        .update({
+          question_id: `${type}:${questionId}`,
+          file_name: baseName,
+          public_url: publicUrl
+        })
+        .eq("id", existingRecord.id);
+      if (updateError) throw updateError;
+      return;
+    }
+    const { error: insertError } = await supabase.from("ra_recordings").insert({
+      question_id: `${type}:${questionId}`,
+      file_name: baseName,
+      file_path: filePath,
+      public_url: publicUrl
+    });
+    if (insertError) throw insertError;
+  };
+
+  // Prefer local-first; if local endpoint is unavailable in current environment, fall back to direct cloud upload.
+  try {
+    const localForm = new FormData();
+    localForm.append("type", type);
+    localForm.append("questionId", questionId);
+    localForm.append("file", file);
+
+    const response = await fetch(LOCAL_UPLOAD_ENDPOINT, { method: "POST", body: localForm });
+    if (!response.ok) throw new Error("local_endpoint_error");
+    const localResult = await response.json();
+    if (!localResult?.ok) throw new Error("local_endpoint_error");
+    if (localResult?.syncResult?.synced === false) throw new Error(localResult.syncResult.error || "cloud_sync_failed");
+    return;
+  } catch (_error) {
+    await uploadDirectToCloud();
+  }
 }
 
 async function getRecordings(type, questionId) {

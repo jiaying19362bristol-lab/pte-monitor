@@ -1,0 +1,16 @@
+{
+  "name": "pte-monitor-local-upload",
+  "version": "1.0.0",
+  "private": true,
+  "main": "local-upload-server.js",
+  "scripts": {
+    "start:local-upload": "node local-upload-server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}
