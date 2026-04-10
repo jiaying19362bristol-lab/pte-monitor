@@ -178,6 +178,29 @@ async function getRecordings(type, questionId) {
   return recordings.map((r) => ({ ...r, comments: grouped[r.id] || [] }));
 }
 
+async function migrateLegacyQuestionIdIfNeeded(type, questionId) {
+  // Legacy RA records were saved as "ra-001" before the unified key format "RA:ra-001".
+  if (type !== "RA") return 0;
+  const newKey = `${type}:${questionId}`;
+  const legacyKey = questionId;
+  if (legacyKey === newKey) return 0;
+
+  const { data: legacyRows, error: legacyReadError } = await supabase
+    .from("ra_recordings")
+    .select("id")
+    .eq("question_id", legacyKey);
+  if (legacyReadError) throw legacyReadError;
+  if (!legacyRows || !legacyRows.length) return 0;
+
+  const { error: updateError } = await supabase
+    .from("ra_recordings")
+    .update({ question_id: newKey })
+    .eq("question_id", legacyKey);
+  if (updateError) throw updateError;
+
+  return legacyRows.length;
+}
+
 async function addComment(recordingId, author, text) {
   const { error } = await supabase.from("ra_comments").insert({
     recording_id: recordingId,
@@ -302,6 +325,15 @@ async function renderQuestionPage(type, questionId) {
   }
 
   setStatus("云端同步已启用（保留3天，超时自动归档到本地并清理云端）。");
+  try {
+    const movedCount = await migrateLegacyQuestionIdIfNeeded(type, questionId);
+    if (movedCount > 0) {
+      setStatus(`已迁移旧数据 ${movedCount} 条到新题型结构。`);
+    }
+  } catch (error) {
+    setStatus(`旧数据迁移失败：${error.message || "未知错误"}`, true);
+  }
+
   const archiveResult = await runAutoArchive(type, questionId);
   if (archiveResult && archiveResult.archivedCount > 0) {
     setStatus(`已自动归档 ${archiveResult.archivedCount} 条到本地，本地共 ${archiveResult.totalArchived} 条。`);
