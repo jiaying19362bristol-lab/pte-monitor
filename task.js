@@ -335,7 +335,7 @@ function renderRecordings(records, type, questionId, isViewer) {
           <div class="record-actions">
             <span>${formatTime(record.created_at)}</span>
             ${
-              record.local_only && !isViewer
+              !isViewer
                 ? `<button
               type="button"
               class="btn secondary record-delete-btn"
@@ -422,7 +422,6 @@ function renderRecordings(records, type, questionId, isViewer) {
         const filePath = button.dataset.filePath;
         const record = records.find((item) => item.file_path === filePath);
         if (!record) return;
-        if (!record.local_only) return;
         await deleteRecording(type, questionId, record);
         await loadAndRenderQuestion(type, questionId, isViewer);
       });
