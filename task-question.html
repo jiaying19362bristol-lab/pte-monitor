@@ -33,5 +33,83 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="supabase-config.js"></script>
     <script src="task.js"></script>
+    <script>
+      setTimeout(function () {
+        if (window.__task_app_loaded) return;
+
+        const titleEl = document.getElementById("question-title");
+        const textEl = document.getElementById("question-text");
+        const statusEl = document.getElementById("sync-status");
+        const listEl = document.getElementById("recording-list");
+        const formEl = document.getElementById("upload-form");
+        const fileEl = document.getElementById("audio-file");
+
+        const params = new URLSearchParams(window.location.search);
+        const type = (params.get("type") || "RA").toUpperCase();
+        const id = params.get("id") || "ra-001";
+        titleEl.textContent = type + " | " + id;
+        textEl.textContent = "兜底模式已启用：主脚本加载失败，已切换到本地上传展示。";
+        statusEl.textContent = "本地模式：上传后会显示本地目录文件。";
+
+        function renderLocalList() {
+          fetch("http://localhost:18787/api/list?type=" + encodeURIComponent(type) + "&questionId=" + encodeURIComponent(id))
+            .then(function (r) {
+              if (!r.ok) throw new Error("list_failed");
+              return r.json();
+            })
+            .then(function (payload) {
+              const files = payload && payload.files ? payload.files : [];
+              if (!files.length) {
+                listEl.innerHTML = "<p class='empty-tip'>还没有上传音频，先上传第一条吧。</p>";
+                return;
+              }
+              listEl.innerHTML = files
+                .map(function (f) {
+                  return (
+                    "<article class='record-card'><div class='record-head'><h3>" +
+                    f.file_name +
+                    "</h3><span>" +
+                    new Date(f.created_at).toLocaleString("zh-CN") +
+                    "</span></div><audio controls src='" +
+                    f.public_url +
+                    "'></audio></article>"
+                  );
+                })
+                .join("");
+            })
+            .catch(function () {
+              statusEl.textContent = "本地列表读取失败，请确认本地服务已运行（18787）。";
+              statusEl.style.color = "#bf1b1b";
+            });
+        }
+
+        formEl.addEventListener("submit", function (e) {
+          e.preventDefault();
+          const file = fileEl.files && fileEl.files[0];
+          if (!file) return;
+          const fd = new FormData();
+          fd.append("type", type);
+          fd.append("questionId", id);
+          fd.append("file", file);
+          fetch("http://localhost:18787/api/upload", { method: "POST", body: fd })
+            .then(function (r) {
+              if (!r.ok) throw new Error("upload_failed");
+              return r.json();
+            })
+            .then(function () {
+              fileEl.value = "";
+              statusEl.textContent = "上传成功（兜底模式）。";
+              statusEl.style.color = "#54627a";
+              renderLocalList();
+            })
+            .catch(function () {
+              statusEl.textContent = "上传失败：请先启动本地上传服务。";
+              statusEl.style.color = "#bf1b1b";
+            });
+        });
+
+        renderLocalList();
+      }, 500);
+    </script>
   </body>
 </html>

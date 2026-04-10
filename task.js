@@ -14,6 +14,7 @@ const TYPE_CONFIG = {
   HIW: { section: "listening", backHref: "listening.html" },
   WFD: { section: "listening", backHref: "listening.html" }
 };
+window.__task_app_loaded = true;
 
 const QUESTION_BANK = {
   RA: [
@@ -43,9 +44,11 @@ const LOCAL_UPLOAD_ENDPOINT = "http://localhost:18787/api/upload";
 
 function getParams() {
   const params = new URLSearchParams(window.location.search);
+  const rawType = (params.get("type") || "").toUpperCase();
+  const rawId = params.get("id") || "";
   return {
-    type: (params.get("type") || "").toUpperCase(),
-    id: params.get("id") || ""
+    type: rawType || "RA",
+    id: rawId || "ra-001"
   };
 }
 
@@ -217,6 +220,20 @@ async function getRecordings(type, questionId) {
   return recordings.map((r) => ({ ...r, comments: grouped[r.id] || [] }));
 }
 
+async function getLocalRecordings(type, questionId) {
+  try {
+    const response = await fetch(
+      `http://localhost:18787/api/list?type=${encodeURIComponent(type)}&questionId=${encodeURIComponent(questionId)}`
+    );
+    if (!response.ok) return [];
+    const payload = await response.json();
+    if (!payload?.ok || !Array.isArray(payload.files)) return [];
+    return payload.files;
+  } catch (_error) {
+    return [];
+  }
+}
+
 async function migrateLegacyQuestionIdIfNeeded(type, questionId) {
   // Legacy RA records were saved as "ra-001" before the unified key format "RA:ra-001".
   if (type !== "RA") return 0;
@@ -284,6 +301,7 @@ function renderRecordings(records, type, questionId) {
         <audio controls src="${record.public_url}"></audio>
         <div class="comment-box">
           <h4>评论区</h4>
+          ${record.local_only ? "<p class='empty-tip'>本地文件（待云同步）暂不支持评论。</p>" : ""}
           <ul>
             ${
               record.comments.length
@@ -305,11 +323,15 @@ function renderRecordings(records, type, questionId) {
                 : "<li>暂无评论</li>"
             }
           </ul>
-          <form class="comment-form" data-id="${record.id}">
+          ${
+            record.local_only
+              ? ""
+              : `<form class="comment-form" data-id="${record.id}">
             <input name="author" placeholder="评论人（如：老师）" required />
             <input name="text" placeholder="输入评论内容" required />
             <button class="btn" type="submit">发布评论</button>
-          </form>
+          </form>`
+          }
         </div>
       </article>
     `
@@ -341,8 +363,22 @@ function renderRecordings(records, type, questionId) {
 }
 
 async function loadAndRenderQuestion(type, questionId) {
-  const records = await getRecordings(type, questionId);
-  renderRecordings(records, type, questionId);
+  const [cloudRecords, localRecords] = await Promise.all([
+    getRecordings(type, questionId).catch(() => []),
+    getLocalRecordings(type, questionId)
+  ]);
+
+  const byPath = new Map();
+  for (const record of cloudRecords) {
+    byPath.set(record.file_path, record);
+  }
+  for (const localItem of localRecords) {
+    if (!byPath.has(localItem.file_path)) byPath.set(localItem.file_path, localItem);
+  }
+  const merged = Array.from(byPath.values()).sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+  renderRecordings(merged, type, questionId);
 }
 
 async function renderQuestionPage(type, questionId) {

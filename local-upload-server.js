@@ -203,6 +203,34 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   });
 });
 
+app.get("/api/list", (req, res) => {
+  const type = sanitize(req.query.type);
+  const questionId = sanitize(req.query.questionId);
+  const targetDir = path.join(rootUploadDir, type, questionId);
+  if (!fs.existsSync(targetDir)) {
+    return res.json({ ok: true, files: [] });
+  }
+  const files = fs
+    .readdirSync(targetDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const absPath = path.join(targetDir, entry.name);
+      const relativePath = relativePathFromAbsolute(absPath);
+      const stats = fs.statSync(absPath);
+      return {
+        file_name: entry.name,
+        local_only: true,
+        public_url: `http://localhost:${port}/files/${relativePath}`,
+        created_at: stats.mtime.toISOString(),
+        file_path: relativePath,
+        id: `local:${relativePath}`,
+        comments: []
+      };
+    })
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return res.json({ ok: true, files });
+});
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
