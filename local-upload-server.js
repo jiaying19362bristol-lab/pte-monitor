@@ -231,6 +231,28 @@ app.get("/api/list", (req, res) => {
   return res.json({ ok: true, files });
 });
 
+app.delete("/api/file", (req, res) => {
+  const rawRelative = String(req.query.relativePath || "").replaceAll("\\", "/");
+  if (!rawRelative) return res.status(400).json({ ok: false, error: "relativePath is required" });
+  const absolutePath = path.resolve(rootUploadDir, rawRelative);
+  const rootResolved = path.resolve(rootUploadDir);
+  if (!absolutePath.startsWith(rootResolved)) {
+    return res.status(400).json({ ok: false, error: "invalid path" });
+  }
+  if (!fs.existsSync(absolutePath)) return res.json({ ok: true, deleted: false });
+  fs.unlinkSync(absolutePath);
+
+  // Try removing empty parent folders up to rootUploadDir.
+  let current = path.dirname(absolutePath);
+  while (current.startsWith(rootResolved) && current !== rootResolved) {
+    const entries = fs.readdirSync(current);
+    if (entries.length > 0) break;
+    fs.rmdirSync(current);
+    current = path.dirname(current);
+  }
+  return res.json({ ok: true, deleted: true });
+});
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });

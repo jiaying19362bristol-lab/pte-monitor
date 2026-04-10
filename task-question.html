@@ -47,18 +47,71 @@
         const params = new URLSearchParams(window.location.search);
         const type = (params.get("type") || "RA").toUpperCase();
         const id = params.get("id") || "ra-001";
+        const isViewer = params.get("viewer") === "1" || params.get("role") === "viewer";
         titleEl.textContent = type + " | " + id;
-        textEl.textContent = "兜底模式已启用：主脚本加载失败，已切换到本地上传展示。";
-        statusEl.textContent = "本地模式：上传后会显示本地目录文件。";
+        textEl.textContent = "兜底模式已启用：主脚本加载失败，已切换到安全展示模式。";
+        statusEl.textContent = "兜底模式：优先读取云端记录，本地服务可选。";
+        if (isViewer) {
+          formEl.style.display = "none";
+          statusEl.textContent = "访客模式（兜底）：仅查看音频并评论。";
+        }
+
+        function renderCloudList() {
+          if (!window.supabase || !window.SUPABASE_CONFIG || !window.SUPABASE_CONFIG.url || !window.SUPABASE_CONFIG.anonKey) {
+            return Promise.resolve([]);
+          }
+          const client = window.supabase.createClient(window.SUPABASE_CONFIG.url, window.SUPABASE_CONFIG.anonKey);
+          return client
+            .from("ra_recordings")
+            .select("id,file_name,file_path,public_url,created_at")
+            .eq("question_id", type + ":" + id)
+            .order("created_at", { ascending: false })
+            .then(function (res) {
+              if (res && res.data) return res.data;
+              return [];
+            })
+            .catch(function () {
+              return [];
+            });
+        }
 
         function renderLocalList() {
-          fetch("http://localhost:18787/api/list?type=" + encodeURIComponent(type) + "&questionId=" + encodeURIComponent(id))
+          return fetch(
+            "http://localhost:18787/api/list?type=" + encodeURIComponent(type) + "&questionId=" + encodeURIComponent(id)
+          )
             .then(function (r) {
               if (!r.ok) throw new Error("list_failed");
               return r.json();
             })
             .then(function (payload) {
-              const files = payload && payload.files ? payload.files : [];
+              return payload && payload.files ? payload.files : [];
+            })
+            .catch(function () {
+              return [];
+            });
+        }
+
+        function renderMergedList() {
+          Promise.all([renderCloudList(), renderLocalList()])
+            .then(function (both) {
+              var cloud = both[0] || [];
+              var local = both[1] || [];
+              var map = {};
+              cloud.forEach(function (f) {
+                map[f.file_path] = f;
+              });
+              if (!isViewer) {
+                local.forEach(function (f) {
+                  if (!map[f.file_path]) map[f.file_path] = f;
+                });
+              }
+              var files = Object.keys(map).map(function (k) {
+                return map[k];
+              });
+              files.sort(function (a, b) {
+                return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+              });
+
               if (!files.length) {
                 listEl.innerHTML = "<p class='empty-tip'>还没有上传音频，先上传第一条吧。</p>";
                 return;
@@ -68,23 +121,49 @@
                   return (
                     "<article class='record-card'><div class='record-head'><h3>" +
                     f.file_name +
-                    "</h3><span>" +
+                    "</h3><div class='record-actions'><span>" +
                     new Date(f.created_at).toLocaleString("zh-CN") +
-                    "</span></div><audio controls src='" +
+                    "</span>" +
+                    (f.local_only
+                      ? "<button type='button' class='btn secondary record-delete-btn' data-path='" +
+                        f.file_path +
+                        "'>删除音频</button>"
+                      : "") +
+                    "</div></div><audio controls src='" +
                     f.public_url +
                     "'></audio></article>"
                   );
                 })
                 .join("");
+
+              listEl.querySelectorAll(".record-delete-btn").forEach(function (btn) {
+                btn.addEventListener("click", function () {
+                  const relativePath = btn.getAttribute("data-path");
+                  fetch(
+                    "http://localhost:18787/api/file?relativePath=" + encodeURIComponent(relativePath),
+                    { method: "DELETE" }
+                  )
+                    .then(function (r) {
+                      if (!r.ok) throw new Error("delete_failed");
+                      return r.json();
+                    })
+                    .then(function () {
+                      statusEl.textContent = "删除成功（兜底模式）。";
+                      statusEl.style.color = "#54627a";
+                      renderMergedList();
+                    })
+                    .catch(function () {
+                      statusEl.textContent = "删除失败：请确认本地服务已运行。";
+                      statusEl.style.color = "#bf1b1b";
+                    });
+                });
+              });
             })
-            .catch(function () {
-              statusEl.textContent = "本地列表读取失败，请确认本地服务已运行（18787）。";
-              statusEl.style.color = "#bf1b1b";
-            });
         }
 
         formEl.addEventListener("submit", function (e) {
           e.preventDefault();
+          if (isViewer) return;
           const file = fileEl.files && fileEl.files[0];
           if (!file) return;
           const fd = new FormData();
@@ -100,15 +179,15 @@
               fileEl.value = "";
               statusEl.textContent = "上传成功（兜底模式）。";
               statusEl.style.color = "#54627a";
-              renderLocalList();
+              renderMergedList();
             })
             .catch(function () {
-              statusEl.textContent = "上传失败：请先启动本地上传服务。";
+              statusEl.textContent = "上传失败：请检查网络或本地服务。";
               statusEl.style.color = "#bf1b1b";
             });
         });
 
-        renderLocalList();
+        renderMergedList();
       }, 500);
     </script>
   </body>

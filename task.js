@@ -41,14 +41,20 @@ const bucket = config.bucket || "ra-audios";
 const ARCHIVE_KEY = "pte_task_local_archive_v1";
 const RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const LOCAL_UPLOAD_ENDPOINT = "http://localhost:18787/api/upload";
+const LOCAL_DELETE_ENDPOINT = "http://localhost:18787/api/file";
+let isUploading = false;
+let lastUploadSignature = "";
+let lastUploadAt = 0;
 
 function getParams() {
   const params = new URLSearchParams(window.location.search);
   const rawType = (params.get("type") || "").toUpperCase();
   const rawId = params.get("id") || "";
+  const viewer = params.get("viewer") === "1" || params.get("role") === "viewer";
   return {
     type: rawType || "RA",
-    id: rawId || "ra-001"
+    id: rawId || "ra-001",
+    viewer
   };
 }
 
@@ -143,6 +149,14 @@ async function deleteRecordingFromCloud(record) {
 }
 
 async function addRecording(type, questionId, file) {
+  const signature = `${type}|${questionId}|${file.name}|${file.size}|${file.lastModified}`;
+  const now = Date.now();
+  if (signature === lastUploadSignature && now - lastUploadAt < 4000) {
+    throw new Error("检测到重复点击，已忽略重复上传。");
+  }
+  lastUploadSignature = signature;
+  lastUploadAt = now;
+
   const uploadDirectToCloud = async () => {
     const baseName = String(file.name || "upload.bin").replaceAll("/", "_").replaceAll("\\", "_");
     const filePath = `${type}/${questionId}/${baseName}`;
@@ -193,6 +207,28 @@ async function addRecording(type, questionId, file) {
     return;
   } catch (_error) {
     await uploadDirectToCloud();
+  }
+}
+
+async function deleteRecording(type, questionId, record) {
+  if (record.local_only) {
+    const response = await fetch(
+      `${LOCAL_DELETE_ENDPOINT}?relativePath=${encodeURIComponent(record.file_path)}`,
+      { method: "DELETE" }
+    );
+    if (!response.ok) throw new Error("本地删除失败");
+    return;
+  }
+
+  await deleteRecordingFromCloud(record);
+
+  // Best-effort local cleanup if mirrored file exists.
+  try {
+    await fetch(`${LOCAL_DELETE_ENDPOINT}?relativePath=${encodeURIComponent(record.file_path)}`, {
+      method: "DELETE"
+    });
+  } catch (_error) {
+    // ignore local cleanup failure
   }
 }
 
@@ -296,7 +332,20 @@ function renderRecordings(records, type, questionId) {
       <article class="record-card">
         <div class="record-head">
           <h3>${escapeHtml(record.file_name)}</h3>
-          <span>${formatTime(record.created_at)}</span>
+          <div class="record-actions">
+            <span>${formatTime(record.created_at)}</span>
+            ${
+              record.local_only
+                ? `<button
+              type="button"
+              class="btn secondary record-delete-btn"
+              data-file-path="${escapeHtml(record.file_path)}"
+            >
+              删除音频
+            </button>`
+                : ""
+            }
+          </div>
         </div>
         <audio controls src="${record.public_url}"></audio>
         <div class="comment-box">
@@ -360,12 +409,23 @@ function renderRecordings(records, type, questionId) {
       await loadAndRenderQuestion(type, questionId);
     });
   });
+
+  container.querySelectorAll(".record-delete-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const filePath = button.dataset.filePath;
+      const record = records.find((item) => item.file_path === filePath);
+      if (!record) return;
+      if (!record.local_only) return;
+      await deleteRecording(type, questionId, record);
+      await loadAndRenderQuestion(type, questionId);
+    });
+  });
 }
 
-async function loadAndRenderQuestion(type, questionId) {
+async function loadAndRenderQuestion(type, questionId, isViewer) {
   const [cloudRecords, localRecords] = await Promise.all([
     getRecordings(type, questionId).catch(() => []),
-    getLocalRecordings(type, questionId)
+    isViewer ? Promise.resolve([]) : getLocalRecordings(type, questionId)
   ]);
 
   const byPath = new Map();
@@ -381,7 +441,7 @@ async function loadAndRenderQuestion(type, questionId) {
   renderRecordings(merged, type, questionId);
 }
 
-async function renderQuestionPage(type, questionId) {
+async function renderQuestionPage(type, questionId, isViewer) {
   const typeConfig = TYPE_CONFIG[type];
   if (!typeConfig) return renderNotFound();
   const question = getQuestionsByType(type).find((q) => q.id === questionId);
@@ -393,6 +453,12 @@ async function renderQuestionPage(type, questionId) {
   titleEl.textContent = `${type} | ${question.title}`;
   textEl.textContent = question.text;
   backLinkEl.href = `task-list.html?type=${encodeURIComponent(type)}`;
+
+  if (isViewer) {
+    const uploadForm = document.getElementById("upload-form");
+    if (uploadForm) uploadForm.style.display = "none";
+    setStatus("访客模式：仅查看音频并评论。");
+  }
 
   if (!supabaseReady) {
     setStatus("请先在 supabase-config.js 填写 Supabase URL 和 anon key。", true);
@@ -413,35 +479,43 @@ async function renderQuestionPage(type, questionId) {
   if (archiveResult && archiveResult.archivedCount > 0) {
     setStatus(`已自动归档 ${archiveResult.archivedCount} 条到本地，本地共 ${archiveResult.totalArchived} 条。`);
   }
-  await loadAndRenderQuestion(type, questionId);
+  await loadAndRenderQuestion(type, questionId, isViewer);
 
   const uploadForm = document.getElementById("upload-form");
+  if (isViewer || !uploadForm) return;
+  const uploadBtn = uploadForm.querySelector('button[type="submit"]');
   uploadForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (isUploading) return;
     const fileInput = document.getElementById("audio-file");
     const file = fileInput.files && fileInput.files[0];
     if (!file) return;
     try {
+      isUploading = true;
+      if (uploadBtn) uploadBtn.disabled = true;
       setStatus("音频上传中，请稍候...");
       await addRecording(type, questionId, file);
       fileInput.value = "";
       setStatus("上传成功，已同步到云端。");
-      await loadAndRenderQuestion(type, questionId);
+      await loadAndRenderQuestion(type, questionId, isViewer);
     } catch (error) {
       setStatus(`上传失败：${error.message || "未知错误"}`, true);
+    } finally {
+      isUploading = false;
+      if (uploadBtn) uploadBtn.disabled = false;
     }
   });
 }
 
 function init() {
   const path = window.location.pathname;
-  const { type, id } = getParams();
+  const { type, id, viewer } = getParams();
   if (path.endsWith("task-list.html")) {
     renderListPage(type);
     return;
   }
   if (path.endsWith("task-question.html")) {
-    renderQuestionPage(type, id);
+    renderQuestionPage(type, id, viewer);
   }
 }
 
