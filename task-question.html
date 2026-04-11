@@ -20,17 +20,19 @@
 
         <div class="question-content" id="question-text"></div>
 
-        <hr class="split-line" />
+        <div id="ra-module">
+          <hr class="split-line" />
 
-        <h2>上传你的音频</h2>
-        <p>同一道题可以上传多个音频，每个音频都可以单独评论。</p>
-        <form id="upload-form" class="upload-row">
-          <input id="audio-file" type="file" accept="audio/*" required />
-          <button type="submit" class="btn">上传音频</button>
-        </form>
+          <h2>RA 音频管理</h2>
+          <p>上传你的朗读音频。每条音频都支持独立评论和删除。</p>
+          <form id="upload-form" class="upload-row">
+            <input id="audio-file" type="file" accept="audio/*" required />
+            <button type="submit" class="btn">上传音频</button>
+          </form>
 
-        <p id="sync-status" class="sync-status"></p>
-        <div id="recording-list" class="recording-list"></div>
+          <p id="sync-status" class="sync-status"></p>
+          <div id="recording-list" class="recording-list"></div>
+        </div>
       </section>
     </main>
 
@@ -53,12 +55,20 @@
         const id = params.get("id") || "ra-001";
         const isViewer = params.get("viewer") === "1" || params.get("role") === "viewer";
         const shareEl = document.getElementById("viewer-share-link");
+        const config = window.SUPABASE_CONFIG || {};
+        const LOCAL_COMMENTS_KEY = "pte_local_comments_v1";
+        const VISITOR_TOKEN_KEY = "pte_visitor_token_v1";
+        const LOCAL_API_BASE_URL = String(config.localApiBaseUrl || "http://localhost:18787").replace(/\/$/, "");
         titleEl.textContent = type + " | " + id;
         textEl.textContent = "兜底模式已启用：主脚本加载失败，已切换到安全展示模式。";
+        function getShareBaseUrl() {
+          var base = String(config.shareBaseUrl || "").trim();
+          return (base || window.location.origin).replace(/\/$/, "");
+        }
         statusEl.textContent = "兜底模式：优先读取云端记录，本地服务可选。";
         if (shareEl) {
           var shareUrl =
-            window.location.origin +
+            getShareBaseUrl() +
             window.location.pathname +
             "?type=" +
             encodeURIComponent(type) +
@@ -92,9 +102,40 @@
             });
         }
 
+        function renderCloudComments(recordings) {
+          if (!window.supabase || !window.SUPABASE_CONFIG || !window.SUPABASE_CONFIG.url || !window.SUPABASE_CONFIG.anonKey) {
+            return Promise.resolve({});
+          }
+          const recordIds = (recordings || [])
+            .map(function (item) {
+              return item.id;
+            })
+            .filter(function (id) {
+              return id !== null && id !== undefined;
+            });
+          if (!recordIds.length) return Promise.resolve({});
+          const client = window.supabase.createClient(window.SUPABASE_CONFIG.url, window.SUPABASE_CONFIG.anonKey);
+          return client
+            .from("ra_comments")
+            .select("id,recording_id,author,content,created_at,owner_token")
+            .in("recording_id", recordIds)
+            .order("created_at", { ascending: true })
+            .then(function (res) {
+              var grouped = {};
+              (res && res.data ? res.data : []).forEach(function (comment) {
+                if (!grouped[comment.recording_id]) grouped[comment.recording_id] = [];
+                grouped[comment.recording_id].push(comment);
+              });
+              return grouped;
+            })
+            .catch(function () {
+              return {};
+            });
+        }
+
         function renderLocalList() {
           return fetch(
-            "http://localhost:18787/api/list?type=" + encodeURIComponent(type) + "&questionId=" + encodeURIComponent(id)
+            LOCAL_API_BASE_URL + "/api/list?type=" + encodeURIComponent(type) + "&questionId=" + encodeURIComponent(id)
           )
             .then(function (r) {
               if (!r.ok) throw new Error("list_failed");
@@ -108,20 +149,199 @@
             });
         }
 
+        function renderLocalComments() {
+          return fetch(
+            LOCAL_API_BASE_URL + "/api/comments?type=" + encodeURIComponent(type) + "&questionId=" + encodeURIComponent(id)
+          )
+            .then(function (r) {
+              if (!r.ok) throw new Error("comments_failed");
+              return r.json();
+            })
+            .then(function (payload) {
+              return payload && payload.comments ? payload.comments : {};
+            })
+            .catch(function () {
+              return {};
+            });
+        }
+
+        function escapeHtml(text) {
+          return String(text)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#39;");
+        }
+
+        function formatTime(value) {
+          return new Date(value).toLocaleString("zh-CN");
+        }
+
+        function readFallbackComments() {
+          try {
+            var raw = window.localStorage.getItem(LOCAL_COMMENTS_KEY);
+            var parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === "object" ? parsed : {};
+          } catch (_error) {
+            return {};
+          }
+        }
+
+        function writeFallbackComments(state) {
+          window.localStorage.setItem(LOCAL_COMMENTS_KEY, JSON.stringify(state));
+        }
+
+        function getVisitorToken() {
+          try {
+            var token = window.localStorage.getItem(VISITOR_TOKEN_KEY);
+            if (token) return token;
+            token = "visitor-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+            window.localStorage.setItem(VISITOR_TOKEN_KEY, token);
+            return token;
+          } catch (_error) {
+            return "visitor-memory-" + Date.now();
+          }
+        }
+
+        function canDeleteComment(comment) {
+          if (!isViewer) return true;
+          if (String((comment && comment.__origin) || "") === "local") {
+            return String((comment && comment.owner_token) || "") === getVisitorToken();
+          }
+          return String((comment && comment.owner_token) || "") === getVisitorToken();
+        }
+
+        function addLocalComment(relativePath, author, content) {
+          var ownerToken = getVisitorToken();
+          return fetch(LOCAL_API_BASE_URL + "/api/comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              relativePath: relativePath,
+              author: author,
+              content: content,
+              ownerToken: ownerToken
+            })
+          }).then(function (r) {
+            if (!r.ok) throw new Error("comment_create_failed");
+            return r.json();
+          }).catch(function () {
+            var state = readFallbackComments();
+            var list = Array.isArray(state[relativePath]) ? state[relativePath] : [];
+            var comment = {
+              id: Date.now(),
+              author: author,
+              content: content,
+              created_at: new Date().toISOString(),
+              owner_token: ownerToken
+            };
+            list.push(comment);
+            state[relativePath] = list;
+            writeFallbackComments(state);
+            return { ok: true, comment: comment, fallback: true };
+          });
+        }
+
+        function addCloudComment(recordingId, author, content) {
+          if (!window.supabase || !window.SUPABASE_CONFIG || !window.SUPABASE_CONFIG.url || !window.SUPABASE_CONFIG.anonKey) {
+            return Promise.reject(new Error("cloud_not_ready"));
+          }
+          const client = window.supabase.createClient(window.SUPABASE_CONFIG.url, window.SUPABASE_CONFIG.anonKey);
+          return client
+            .from("ra_comments")
+            .insert({
+              recording_id: recordingId,
+              author: author,
+              content: content,
+              owner_token: getVisitorToken()
+            })
+            .select("id")
+            .single();
+        }
+
+        function deleteLocalComment(relativePath, commentId) {
+          var ownerToken = getVisitorToken();
+          return fetch(
+            LOCAL_API_BASE_URL + "/api/comments?relativePath=" +
+              encodeURIComponent(relativePath) +
+              "&commentId=" +
+              encodeURIComponent(commentId) +
+              "&ownerToken=" +
+              encodeURIComponent(ownerToken),
+            { method: "DELETE" }
+          ).then(function (r) {
+            if (!r.ok) throw new Error("comment_delete_failed");
+            return r.json();
+          }).catch(function () {
+            var state = readFallbackComments();
+            var list = Array.isArray(state[relativePath]) ? state[relativePath] : [];
+            state[relativePath] = list.filter(function (comment) {
+              return String(comment.id) !== String(commentId);
+            });
+            writeFallbackComments(state);
+            return { ok: true, fallback: true };
+          });
+        }
+
+        function deleteCloudComment(commentId) {
+          if (!window.supabase || !window.SUPABASE_CONFIG || !window.SUPABASE_CONFIG.url || !window.SUPABASE_CONFIG.anonKey) {
+            return Promise.reject(new Error("cloud_not_ready"));
+          }
+          const client = window.supabase.createClient(window.SUPABASE_CONFIG.url, window.SUPABASE_CONFIG.anonKey);
+          return client.from("ra_comments").delete().eq("id", commentId).eq("owner_token", getVisitorToken());
+        }
+
+        function withOrigin(comments, origin) {
+          return (Array.isArray(comments) ? comments : []).map(function (comment) {
+            var copy = {};
+            Object.keys(comment || {}).forEach(function (key) {
+              copy[key] = comment[key];
+            });
+            copy.__origin = origin;
+            return copy;
+          });
+        }
+
         function renderMergedList() {
-          Promise.all([renderCloudList(), renderLocalList()])
+          Promise.all([renderCloudList(), renderLocalList(), renderLocalComments()])
             .then(function (both) {
               var cloud = both[0] || [];
               var local = both[1] || [];
+              var localComments = Object.assign({}, readFallbackComments(), both[2] || {});
+              return renderCloudComments(cloud).then(function (cloudComments) {
               var map = {};
               cloud.forEach(function (f) {
-                map[f.file_path] = f;
+                map[f.file_path] = {
+                  id: f.id,
+                  file_name: f.file_name,
+                  file_path: f.file_path,
+                  public_url: f.public_url,
+                  created_at: f.created_at,
+                  local_only: false,
+                  local_exists: false,
+                  cloud_exists: true,
+                  comments: withOrigin(cloudComments[f.id] || [], "cloud")
+                };
               });
-              if (!isViewer) {
-                local.forEach(function (f) {
-                  if (!map[f.file_path]) map[f.file_path] = f;
-                });
-              }
+              local.forEach(function (f) {
+                if (!map[f.file_path]) {
+                  map[f.file_path] = {
+                    id: f.id,
+                    file_name: f.file_name,
+                    file_path: f.file_path,
+                    public_url: f.public_url,
+                    created_at: f.created_at,
+                    local_only: true,
+                    local_exists: true,
+                    cloud_exists: false,
+                    comments: withOrigin(localComments[f.file_path] || [], "local")
+                  };
+                  return;
+                }
+                map[f.file_path].local_exists = true;
+                map[f.file_path].comments = withOrigin(localComments[f.file_path] || [], "local");
+              });
               var files = Object.keys(map).map(function (k) {
                 return map[k];
               });
@@ -135,22 +355,57 @@
               }
               listEl.innerHTML = files
                 .map(function (f) {
+                  var comments = Array.isArray(f.comments) ? f.comments : [];
+                  var commentsHtml = comments.length
+                    ? comments
+                        .map(function (comment) {
+                          var deleteBtn = canDeleteComment(comment)
+                            ? "<button type='button' class='btn secondary comment-delete-btn' data-file-path='" +
+                              escapeHtml(f.file_path) +
+                              "' data-comment-id='" +
+                              escapeHtml(String(comment.id)) +
+                              "' data-comment-origin='" +
+                              escapeHtml(comment.__origin || "cloud") +
+                              "'>删除</button>"
+                            : "";
+                          return (
+                            "<li><div class='comment-row'><span><strong>" +
+                            escapeHtml(comment.author) +
+                            "</strong>：" +
+                            escapeHtml(comment.content) +
+                            "</span>" +
+                            deleteBtn +
+                            "</div><span class='comment-time'>" +
+                            formatTime(comment.created_at) +
+                            "</span></li>"
+                          );
+                        })
+                        .join("")
+                    : "<li>暂无评论</li>";
                   return (
                     "<article class='record-card'><div class='record-head'><h3>" +
-                    f.file_name +
+                    escapeHtml(f.file_name) +
                     "</h3><div class='record-actions'><span>" +
-                    new Date(f.created_at).toLocaleString("zh-CN") +
+                    formatTime(f.created_at) +
                     "</span>" +
-                    (!isViewer && f.local_only
+                    (!isViewer && (f.local_only || f.local_exists || f.cloud_exists)
                       ? "<button type='button' class='btn secondary record-delete-btn' data-path='" +
-                        f.file_path +
+                        escapeHtml(f.file_path) +
                         "' data-local='" +
                         (f.local_only ? "1" : "0") +
                         "'>删除音频</button>"
                       : "") +
                     "</div></div><audio controls src='" +
-                    f.public_url +
-                    "'></audio></article>"
+                    escapeHtml(f.public_url) +
+                    "'></audio><div class='comment-box'><h4>评论区</h4><ul>" +
+                    commentsHtml +
+                    "</ul><form class='comment-form' data-file-path='" +
+                    escapeHtml(f.file_path) +
+                    "' data-recording-id='" +
+                    escapeHtml(String(f.id)) +
+                    "' data-comment-target='" +
+                    (f.local_exists ? "local" : "cloud") +
+                    "'><input name='author' placeholder='评论人（如：老师）' required /><input name='text' placeholder='输入评论内容' required /><button class='btn' type='submit'>发布评论</button></form></div></article>"
                   );
                 })
                 .join("");
@@ -160,8 +415,8 @@
                   const relativePath = btn.getAttribute("data-path");
                   const isLocal = btn.getAttribute("data-local") === "1";
                   const endpoint = isLocal
-                    ? "http://localhost:18787/api/file?relativePath=" + encodeURIComponent(relativePath)
-                    : "http://localhost:18787/api/cloud-file?relativePath=" + encodeURIComponent(relativePath);
+                    ? LOCAL_API_BASE_URL + "/api/file?relativePath=" + encodeURIComponent(relativePath)
+                    : LOCAL_API_BASE_URL + "/api/cloud-file?relativePath=" + encodeURIComponent(relativePath);
                   fetch(endpoint, { method: "DELETE" })
                     .then(function (r) {
                       if (!r.ok) throw new Error("delete_failed");
@@ -178,8 +433,57 @@
                     });
                 });
               });
+              });
             })
         }
+
+        listEl.addEventListener("submit", function (event) {
+          var form = event.target.closest(".comment-form");
+          if (!form) return;
+          event.preventDefault();
+          var formData = new FormData(form);
+          var author = String(formData.get("author") || "").trim();
+          var text = String(formData.get("text") || "").trim();
+          var filePath = form.getAttribute("data-file-path");
+          var recordingId = form.getAttribute("data-recording-id");
+          var commentTarget = form.getAttribute("data-comment-target");
+          if (!author || !text) return;
+          var action = commentTarget === "local"
+            ? addLocalComment(filePath, author, text)
+            : addCloudComment(recordingId, author, text);
+          action
+            .then(function (res) {
+              if (res && res.error) throw res.error;
+              form.reset();
+              statusEl.textContent = "评论发布成功。";
+              statusEl.style.color = "#54627a";
+              renderMergedList();
+            })
+            .catch(function () {
+              statusEl.textContent = "评论发布失败：请检查本地服务或云端配置。";
+              statusEl.style.color = "#bf1b1b";
+            });
+        });
+
+        listEl.addEventListener("click", function (event) {
+          var button = event.target.closest(".comment-delete-btn");
+          if (!button) return;
+          var filePath = button.getAttribute("data-file-path");
+          var commentId = button.getAttribute("data-comment-id");
+          var commentOrigin = button.getAttribute("data-comment-origin");
+          var action = commentOrigin === "local" ? deleteLocalComment(filePath, commentId) : deleteCloudComment(commentId);
+          action
+            .then(function (res) {
+              if (res && res.error) throw res.error;
+              statusEl.textContent = "评论已删除。";
+              statusEl.style.color = "#54627a";
+              renderMergedList();
+            })
+            .catch(function () {
+              statusEl.textContent = "评论删除失败：请检查本地服务或云端配置。";
+              statusEl.style.color = "#bf1b1b";
+            });
+        });
 
         formEl.addEventListener("submit", function (e) {
           e.preventDefault();
@@ -190,7 +494,7 @@
           fd.append("type", type);
           fd.append("questionId", id);
           fd.append("file", file);
-          fetch("http://localhost:18787/api/upload", { method: "POST", body: fd })
+          fetch(LOCAL_API_BASE_URL + "/api/upload", { method: "POST", body: fd })
             .then(function (r) {
               if (!r.ok) throw new Error("upload_failed");
               return r.json();

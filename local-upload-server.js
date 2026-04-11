@@ -12,6 +12,7 @@ const app = express();
 const port = Number(process.env.LOCAL_UPLOAD_PORT || 18787);
 const rootUploadDir = path.join(__dirname, "local-uploads");
 const syncStatePath = path.join(rootUploadDir, ".sync-state.json");
+const commentsStatePath = path.join(rootUploadDir, ".comments-state.json");
 const supabaseUrl = process.env.SUPABASE_URL || "";
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const supabaseBucket = process.env.SUPABASE_BUCKET || "ra-audios";
@@ -42,6 +43,19 @@ function readSyncState() {
 
 function writeSyncState(state) {
   fs.writeFileSync(syncStatePath, JSON.stringify(state, null, 2), "utf8");
+}
+
+function readCommentsState() {
+  if (!fs.existsSync(commentsStatePath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(commentsStatePath, "utf8"));
+  } catch (_error) {
+    return {};
+  }
+}
+
+function writeCommentsState(state) {
+  fs.writeFileSync(commentsStatePath, JSON.stringify(state, null, 2), "utf8");
 }
 
 function relativePathFromAbsolute(filePath) {
@@ -231,7 +245,7 @@ app.get("/api/list", (req, res) => {
   return res.json({ ok: true, files });
 });
 
-app.delete("/api/file", (req, res) => {
+app.delete("/api/file", async (req, res) => {
   const rawRelative = String(req.query.relativePath || "").replaceAll("\\", "/");
   if (!rawRelative) return res.status(400).json({ ok: false, error: "relativePath is required" });
   const absolutePath = path.resolve(rootUploadDir, rawRelative);
@@ -239,7 +253,7 @@ app.delete("/api/file", (req, res) => {
   if (!absolutePath.startsWith(rootResolved)) {
     return res.status(400).json({ ok: false, error: "invalid path" });
   }
-  if (!fs.existsSync(absolutePath)) return res.json({ ok: true, deleted: false });
+  if (!fs.existsSync(absolutePath)) return res.json({ ok: true, deleted: false, cloudDeleted: false });
   fs.unlinkSync(absolutePath);
 
   // Try removing empty parent folders up to rootUploadDir.
@@ -250,6 +264,101 @@ app.delete("/api/file", (req, res) => {
     fs.rmdirSync(current);
     current = path.dirname(current);
   }
+  let cloudDeleted = false;
+  const normalizedRelative = rawRelative.replaceAll("\\", "/");
+  if (syncEnabled && supabase) {
+    try {
+      await ensureBucketExists();
+      const { error: storageError } = await supabase.storage.from(supabaseBucket).remove([normalizedRelative]);
+      if (storageError) {
+        console.warn(`Cloud storage delete warning: ${storageError.message}`);
+      }
+      const { error: dbError } = await supabase.from("ra_recordings").delete().eq("file_path", normalizedRelative);
+      if (dbError) {
+        console.warn(`Cloud DB delete warning: ${dbError.message}`);
+      } else {
+        cloudDeleted = true;
+      }
+      const state = readSyncState();
+      if (state[normalizedRelative]) {
+        delete state[normalizedRelative];
+        writeSyncState(state);
+      }
+    } catch (error) {
+      console.warn(`Cloud delete failed for ${normalizedRelative}: ${error.message}`);
+    }
+  }
+  const commentsState = readCommentsState();
+  if (commentsState[normalizedRelative]) {
+    delete commentsState[normalizedRelative];
+    writeCommentsState(commentsState);
+  }
+  return res.json({ ok: true, deleted: true, cloudDeleted });
+});
+
+app.get("/api/comments", (req, res) => {
+  const type = sanitize(req.query.type);
+  const questionId = sanitize(req.query.questionId);
+  if (!type || !questionId) {
+    return res.status(400).json({ ok: false, error: "type and questionId are required" });
+  }
+  const prefix = `${type}/${questionId}/`;
+  const state = readCommentsState();
+  const scoped = {};
+  for (const [filePath, comments] of Object.entries(state)) {
+    if (!filePath.startsWith(prefix)) continue;
+    scoped[filePath] = Array.isArray(comments) ? comments : [];
+  }
+  return res.json({ ok: true, comments: scoped });
+});
+
+app.post("/api/comments", (req, res) => {
+  const relativePath = String(req.body?.relativePath || "").replaceAll("\\", "/");
+  const author = String(req.body?.author || "").trim();
+  const content = String(req.body?.content || "").trim();
+  const ownerToken = String(req.body?.ownerToken || "").trim();
+  if (!relativePath || !author || !content) {
+    return res.status(400).json({ ok: false, error: "relativePath, author and content are required" });
+  }
+  const absolutePath = path.resolve(rootUploadDir, relativePath);
+  const rootResolved = path.resolve(rootUploadDir);
+  if (!absolutePath.startsWith(rootResolved)) {
+    return res.status(400).json({ ok: false, error: "invalid path" });
+  }
+  if (!fs.existsSync(absolutePath)) {
+    return res.status(404).json({ ok: false, error: "file not found" });
+  }
+  const state = readCommentsState();
+  const list = Array.isArray(state[relativePath]) ? state[relativePath] : [];
+  const comment = {
+    id: Date.now(),
+    author,
+    content,
+    created_at: new Date().toISOString(),
+    owner_token: ownerToken || null
+  };
+  list.push(comment);
+  state[relativePath] = list;
+  writeCommentsState(state);
+  return res.json({ ok: true, comment });
+});
+
+app.delete("/api/comments", (req, res) => {
+  const relativePath = String(req.query.relativePath || "").replaceAll("\\", "/");
+  const commentId = Number(req.query.commentId);
+  const ownerToken = String(req.query.ownerToken || "").trim();
+  if (!relativePath || Number.isNaN(commentId)) {
+    return res.status(400).json({ ok: false, error: "relativePath and numeric commentId are required" });
+  }
+  const state = readCommentsState();
+  const list = Array.isArray(state[relativePath]) ? state[relativePath] : [];
+  const target = list.find((c) => Number(c.id) === commentId);
+  if (!target) return res.json({ ok: true, deleted: false });
+  if (target.owner_token && target.owner_token !== ownerToken) {
+    return res.status(403).json({ ok: false, error: "forbidden" });
+  }
+  state[relativePath] = list.filter((c) => Number(c.id) !== commentId);
+  writeCommentsState(state);
   return res.json({ ok: true, deleted: true });
 });
 
